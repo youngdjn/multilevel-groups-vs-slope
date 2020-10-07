@@ -276,6 +276,8 @@ ggplot(params_summ,aes(x=ngroups, y = slope_mean)) +
 ```
 The more groups, the more the slope is reduced -- with 20 groups, over 90% of the overall variation gets absorbed by the group intercepts
 
+*This is interesting because it suggests the group-level variance term is estimated to be larger as the number of groups increases, at least up to about 20 groups. I would have guessed with few groups the group-level variance would be estimated to be the same, but with more uncertainty, but it seems that is not the case!
+
 ## What if there is overlap between the groups?
 
 Here's an example of overlap
