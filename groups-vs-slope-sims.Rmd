@@ -1,0 +1,386 @@
+---
+title: "The great random effects debate rises again"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+library(tidyverse)
+library(lme4)
+library(furrr)
+library(brms)
+
+plan(multiprocess) # use all cores for future_* functions
+
+```
+
+### Function for simulating observations along a line from multiple gruops
+
+```{r}
+
+### Function for generating (simulating) sample observations across multiple groups
+make_points = function(x_sd = 0, y_sd = 0, npoints, ngroups, x_width, group_spacing) {
+  
+  # x_width: how wide a range of x values should be spanned by all the points?
+  # group_spacing: what percentage of the x_width goes toward spacing between groups? Negative for overlap. Range: -1 (complete overlap) to 1 equal spacing btwn points and sapce
+  
+  # Assume a 1:1 straight line
+  intercept = 0
+  slope = 1
+  
+  ## Divide the requested n points among all groups
+  n_pts_per_grp = npoints / ngroups
+  remainder = n_pts_per_grp - floor(n_pts_per_grp) # used to randomly assign an integer number of points across groups
+
+  x_width_per_group = x_width/ngroups
+  spacing_per_group = x_width_per_group * group_spacing
+    
+  ## Simulate points for each group
+  
+  group_start = 0 # to keep track of x range from one group to the next
+  points = list() # to hold the points from all groups
+  
+  for(i in 1:ngroups) {
+    
+      group_name = as.character(i)
+      
+      # get x range
+      xmin = group_start
+      xmax = xmin + x_width_per_group
+      
+      # prep for next group
+      group_start = xmax + spacing_per_group
+      
+      # how many points in this group?
+      npoints_group = n_pts_per_grp + rbinom(1,1,remainder)
+      
+      x_vals_noerr = seq(from = xmin, to = xmax, length.out = npoints_group)
+
+      points_group = data.frame(x_vals_noerr, group = group_name)
+      points[[i]] = points_group
+  }
+  
+  points = bind_rows(points)
+
+  # scale the x axis range to the range specified, and add error and calc y values and add err
+  max_x = max(points$x_vals_noerr)
+  points = points %>%
+    mutate( x_vals_noerr = x_vals_noerr / max_x * x_width,  
+            x_vals_err = x_vals_noerr + rnorm(n=length(x_vals_noerr), sd = x_sd),
+            y_vals_noerr = x_vals_noerr * slope + intercept,
+            y_vals_err = y_vals_noerr + rnorm(n=length(y_vals_noerr), sd = y_sd)
+    ) %>%
+    select(x = x_vals_err, y = y_vals_err, group)
+  
+  
+  return(points)
+}
+
+```
+
+
+
+## Simulating three groups of points which fall on the same line
+
+### First, only minor error (SD = 0.2) in the response variable (residual error)
+
+```{r, fig.width=5,fig.height=3}
+
+points = make_points(x_sd = 0, y_sd = 0.2, npoints = 150, ngroups = 3, x_width = 15, group_spacing = 0.2)
+
+ggplot(points,aes(x=x,y=y,color=group)) +
+  geom_point()
+```
+
+#### Fit the model and get the overall slope and intercept and the group-level intercepts
+
+```{r, paged.print=FALSE}
+m = lmer(y ~ x + (1| group), points)
+fixef(m)
+ranef(m)$group
+```
+Here, the random intercepts are not absorbing the group-level intercept; it is being explained entirely by the fixed effect slope.
+
+#### Plot model predictions
+
+```{r, fig.width=5,fig.height=3}
+points$pred_conditional = predict(m) # predictions made for the actual groups 
+points$pred_fixed = predict(m, re.form = NA) # predictions made for the overall (fixed-effect) pattern only
+ggplot(points,aes(x=x,y=pred_conditional,color=group)) +
+    geom_abline(intercept=0,slope=1)  +
+    geom_point(aes(y = pred_fixed), color="grey50") +
+    geom_point() +
+    labs(y = "y")
+```
+The black line is the underlying pattern that was simulated. Predictions look good for both conditional and fixed-effects only (they are on top of each other)
+
+
+### Adding (measurement) error (SD = 0.5) in the predictor variable.
+
+Again, only minor error (SD = 0.2) in the response variable
+
+```{r, fig.width=5,fig.height=3}
+
+points = make_points(x_sd = 0.5, y_sd = 0.2, npoints = 150, ngroups = 3, x_width = 15, group_spacing = 0.2)
+
+ggplot(points,aes(x=x,y=y,color=group)) +
+  geom_point()
+```
+
+#### Fit the model and get the overall slope and intercept and the group-level intercepts
+
+```{r, paged.print=FALSE, results = 'hold'}
+m = lmer(y ~ x + (1| group), points)
+fixef(m)
+ranef(m)$group
+```
+Now the overall slope is less and the random intercepts are absorbing some of the group-level variation.
+
+
+#### Plot model predictions
+
+```{r, fig.width=5,fig.height=3}
+points$pred_conditional = predict(m) # predictions made for the actual groups 
+points$pred_fixed = predict(m, re.form = NA) # predictions made for the overall (fixed-effect) pattern only
+ggplot(points,aes(x=x,y=pred_conditional,color=group)) +
+    geom_abline(intercept=0,slope=1)  +
+    geom_point(aes(y = pred_fixed), color="grey50") +
+    geom_point() +
+    labs(y = "y")
+```
+The conditional (including random intercept) predictions coarsely track the true pattern across groups, but the slope is off. The fixed-effects-only prediction has a shallower slope than the true pattern. This seems to be more problematic the more x variance there is, but it doesn't seem to depend on y (residual) variance.
+
+
+## How does the underestimation of the overall slope depend on x (predictor) measurement error and sample size?
+
+Still assuming a 1:1 straight line is the true pattern and y error is 0.2 SD
+
+```{r message=FALSE, warning=FALSE}
+
+### Function for getting the overall model slope for a given sample size and x standard deviation
+
+slope_fun = function(npoints, x_sd) {
+  
+  points = make_points(x_sd = x_sd, y_sd = 0.2, npoints = npoints, ngroups = 3, x_width = 15, group_spacing = 0.2)
+
+  # Fit model and get fixed-effect slope
+  m = lmer(y ~ x + (1| group), points)
+  slope = fixef(m)[["x"]]
+
+}
+
+### Get this slope for pairwise combinations of sample size and y_sd
+npoints = seq(20,by=20, length.out = 10)
+x_sd = seq(0,by=0.2, length.out = 11)
+
+params = expand_grid(npoints,x_sd)
+
+# repeat it 100 times to get mean and variance of the slope-reduction effect
+params = map_dfr(seq_len(50), function(x) params)
+
+params_to_pass = list(npoints = as.list(params$npoints), x_sd = as.list(params$x_sd)) 
+slope_pred = future_pmap_dbl(params_to_pass, slope_fun)
+
+params$slope = slope_pred
+
+# summarize (get mean and 10th-90th percentiles of predicted slope)
+params_summ = params %>%
+  group_by(x_sd, npoints) %>%
+  summarize(slope_mean = mean(slope),
+            slope_lwr = quantile(slope,0.10),
+            slope_upr = quantile(slope,0.90))
+
+ggplot(params_summ,aes(x=x_sd, y = npoints, fill = slope_mean)) +
+  geom_tile() +
+  scale_fill_viridis_c()
+
+
+```
+
+So when the measurement error on the predictor variable is 1 SD, the slope is (on average) reduced from 1.0 to about 0.6. This appears largely independent of smaple size, except at very smallest sample sizes (n = 5 samples per group).
+
+How variable is this slope reduction effect as a consequence of random variation in the sample?
+
+```{r, fig.width=5,fig.height=3}
+
+params_summ_plot = params_summ %>%
+  filter(npoints %in% c(20, 100)) %>%
+  mutate(npoints = as.factor(npoints))
+  
+
+ggplot(params_summ_plot, aes(x = x_sd, y = slope_mean, color=npoints, fill = npoints)) +
+    geom_ribbon(aes(ymin = slope_lwr, ymax = slope_upr), alpha = 0.2, color=NA) +
+    geom_line()
+
+
+
+```
+
+Not a huge amount of variation from one random simulation of points to the next. The variation is greater when the sample size is smaller.
+
+## How much does the slope reduction depend on the number of groups?
+
+Assuming x_sd = 1.0
+
+Here's an example of 20 groups with 150 points (same as the earlier datasets shown)
+
+```{r}
+  points = make_points(x_sd = 1.0, y_sd = 0.2, npoints = 150, ngroups = 20, x_width = 15, group_spacing = 0)
+
+ggplot(points,aes(x=x,y=y,color=group)) +
+  geom_point()
+```
+
+Test over a range of n groups. Same total number of points each time (just divide the points evenly among the groups -- as in figure above where the same number of 150 points was divided among 20 groups)
+
+```{r message=FALSE, warning=FALSE}
+
+### Function for getting the overall model slope for a given sample size and x standard deviation
+
+slope_fun = function(ngroups) {
+  
+  points = make_points(x_sd = 1.0, y_sd = 0.2, npoints = 150, ngroups = ngroups, x_width = 15, group_spacing = 0)
+
+  # Fit model and get fixed-effect slope
+  m = lmer(y ~ x + (1| group), points)
+  slope = fixef(m)[["x"]]
+
+}
+
+### Get this slope for a range of ngroups
+ngroups = 2:50
+
+# repeat it 100 times to get mean and variance of the slope-reduction effect
+ngroups = rep(ngroups,50)
+
+slope_pred = future_map_dbl(ngroups, slope_fun)
+
+params = data.frame(ngroups,slope = slope_pred)
+
+# summarize (get mean and 10th-90th percentiles of predicted slope)
+params_summ = params %>%
+  group_by(ngroups) %>%
+  summarize(slope_mean = mean(slope),
+            slope_lwr = quantile(slope,0.10),
+            slope_upr = quantile(slope,0.90))
+
+ggplot(params_summ,aes(x=ngroups, y = slope_mean)) +
+  #geom_ribbon(aes(xmin = slope_lwr, xmax = slope_upr),alpha = 0.5) +
+  geom_line()
+
+
+
+```
+The more groups, the more the slope is reduced -- with 20 groups, over 90% of the overall variation gets absorbed by the group intercepts
+
+## What if there is overlap between the groups?
+
+Here's an example of overlap
+
+```{r}
+
+  points = make_points(x_sd = 0.2, y_sd = 0.2, npoints = 150, ngroups = 5, x_width = 15, group_spacing = -0.3)
+
+ggplot(points,aes(x=x,y=y,color=group)) +
+  geom_point()
+
+```
+
+Test along a range in spacing. Assuming 10 groups.
+
+```{r message=FALSE, warning=FALSE}
+
+### Function for getting the overall model slope for a given sample size and x standard deviation
+
+slope_fun = function(group_spacing) {
+  
+  points = make_points(x_sd = 1.0, y_sd = 0.2, npoints = 150, ngroups = 10, x_width = 15, group_spacing = group_spacing)
+
+  # Fit model and get fixed-effect slope
+  m = lmer(y ~ x + (1| group), points)
+  slope = fixef(m)[["x"]]
+
+}
+
+### Get this slope for a range of ngroups
+group_spacing = seq(from=-1, to = 1, by = 0.2)
+
+# repeat it 100 times to get mean and variance of the slope-reduction effect
+group_spacing = rep(group_spacing,20)
+
+slope_pred = future_map_dbl(group_spacing, slope_fun)
+
+params = data.frame(group_spacing,slope = slope_pred)
+
+# summarize (get mean and 10th-90th percentiles of predicted slope)
+params_summ = params %>%
+  group_by(group_spacing) %>%
+  summarize(slope_mean = mean(slope),
+            slope_lwr = quantile(slope,0.10),
+            slope_upr = quantile(slope,0.90))
+
+ggplot(params_summ,aes(x=group_spacing, y = slope_mean)) +
+  #geom_ribbon(aes(xmin = slope_lwr, xmax = slope_upr), alpha = 0.5) +
+  geom_line()
+
+
+
+```
+With complete overlap (spacing = -1), there is very little absorption by the random intercepts. With 50% overlap between adjacent groups, the slope is still reduced by > 50% due to absorption by random effects.
+
+## Does the same thing happen using BRMS?
+
+Assuming x_sd = 1, group spacing = 0, 10 groups.
+
+```{r}
+  points = make_points(x_sd = 1, y_sd = 0.2, npoints = 150, ngroups = 10, x_width = 15, group_spacing = 0)
+
+ggplot(points,aes(x=x,y=y,color=group)) +
+  geom_point()
+```
+
+
+Starting with lmer.
+
+```{r}
+
+  m = lmer(y ~ x + (1| group), points)
+  slope = fixef(m)[["x"]]
+  slope
+
+```
+
+Now with BRMS
+
+```{r message=FALSE, warning=FALSE, results = 'hide'}
+
+m = brm(y ~ x + (1| group), points, cores=4)
+
+```
+
+```{r}
+fixef(m)
+```
+
+
+
+Yes, same thing hapens. Very similar fit. Now what happens if we specify a known x error?
+
+```{r message=FALSE, warning=FALSE, results = 'hide'}
+
+m = brm(y ~ me(x,1) + (1| group), points, cores=4)
+
+```
+
+```{r}
+fixef(m)
+```
+
+
+
+This didn't seem to fix it.
+
+
