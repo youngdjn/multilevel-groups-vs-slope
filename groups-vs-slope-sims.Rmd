@@ -22,10 +22,11 @@ plan(multiprocess) # use all cores for future_* functions
 ```{r}
 
 ### Function for generating (simulating) sample observations across multiple groups
-make_points = function(x_sd = 0, y_sd = 0, npoints, ngroups, x_width, group_spacing) {
+make_points = function(x_sd = 0, y_sd = 0, npoints, ngroups, x_width, group_spacing, fixed_pts_per_grp = FALSE) {
   
   # x_width: how wide a range of x values should be spanned by all the points?
   # group_spacing: what percentage of the x_width goes toward spacing between groups? Negative for overlap. Range: -1 (complete overlap) to 1 equal spacing btwn points and sapce
+  # fixed_n_points: if TRUE, don't divide the number of points among the number of groups; keep the specified number of points per group.
   
   # Assume a 1:1 straight line
   intercept = 0
@@ -34,6 +35,12 @@ make_points = function(x_sd = 0, y_sd = 0, npoints, ngroups, x_width, group_spac
   ## Divide the requested n points among all groups
   n_pts_per_grp = npoints / ngroups
   remainder = n_pts_per_grp - floor(n_pts_per_grp) # used to randomly assign an integer number of points across groups
+  
+  ## Or if using fixed n pts per group
+  if(fixed_pts_per_grp) {
+    n_pts_per_grp = npoints
+    remainder = 0
+  }
 
   x_width_per_group = x_width/ngroups
   spacing_per_group = x_width_per_group * group_spacing
@@ -277,6 +284,54 @@ ggplot(params_summ,aes(x=ngroups, y = slope_mean)) +
 The more groups, the more the slope is reduced -- with 20 groups, over 90% of the overall variation gets absorbed by the group intercepts
 
 *This is interesting because it suggests the group-level variance term is estimated to be larger as the number of groups increases, at least up to about 20 groups. I would have guessed with few groups the group-level variance would be estimated to be the same, but with more uncertainty, but it seems that is not the case!
+
+How much of this might be due to the fact that with more groups, there are fewer points per group?
+
+## Repeat with a fixed number of points per group
+Using 10 points per group
+
+```{r message=FALSE, warning=FALSE}
+
+### Function for getting the overall model slope for a given sample size and x standard deviation
+
+slope_fun = function(ngroups) {
+  
+  points = make_points(x_sd = 1.0, y_sd = 0.2, npoints = 10, ngroups = ngroups, x_width = 15, group_spacing = 0, fixed_pts_per_grp = TRUE)
+  
+  # Fit model and get fixed-effect slope
+  m = lmer(y ~ x + (1| group), points)
+  slope = fixef(m)[["x"]]
+
+}
+
+### Get this slope for a range of ngroups
+ngroups = 2:50
+
+# repeat it 100 times to get mean and variance of the slope-reduction effect
+ngroups = rep(ngroups,50)
+
+slope_pred = future_map_dbl(ngroups, slope_fun)
+
+params = data.frame(ngroups,slope = slope_pred)
+
+# summarize (get mean and 10th-90th percentiles of predicted slope)
+params_summ = params %>%
+  group_by(ngroups) %>%
+  summarize(slope_mean = mean(slope),
+            slope_lwr = quantile(slope,0.10),
+            slope_upr = quantile(slope,0.90))
+
+ggplot(params_summ,aes(x=ngroups, y = slope_mean)) +
+  #geom_ribbon(aes(xmin = slope_lwr, xmax = slope_upr),alpha = 0.5) +
+  geom_line()
+
+
+
+```
+
+
+Similar results. The steepness of this decline depends on the number of points per group, but it generally follows the same pattern quite closely.
+
 
 ## What if there is overlap between the groups?
 
