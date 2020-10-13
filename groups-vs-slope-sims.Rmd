@@ -26,7 +26,7 @@ make_points = function(x_sd = 0, y_sd = 0, npoints, ngroups, x_width, group_spac
   
   # x_width: how wide a range of x values should be spanned by all the points?
   # group_spacing: what percentage of the x_width goes toward spacing between groups? Negative for overlap. Range: -1 (complete overlap) to 1 equal spacing btwn points and sapce
-  # fixed_n_points: if TRUE, don't divide the number of points among the number of groups; keep the specified number of points per group.
+  # fixed_pts_per_grp: if TRUE, don't divide the number of points among the number of groups; keep the specified number of points per group.
   
   # Assume a 1:1 straight line
   intercept = 0
